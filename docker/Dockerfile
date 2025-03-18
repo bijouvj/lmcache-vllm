@@ -66,31 +66,38 @@ ENV MAX_JOBS=${max_jobs}
 ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
-
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-build.txt
 
+WORKDIR /workspace
+
+RUN git clone -b v0.1.3 https://github.com/bijouvj/LMCache.git
 RUN git clone https://github.com/LMCache/torchac_cuda
+
+WORKDIR /workspace/LMCache
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/pip \
+    python3 setup.py bdist_wheel --dist-dir=dist_lmc_kvikio
+
 WORKDIR /workspace/torchac_cuda
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
-    python3 setup.py bdist_wheel --dist-dir=dist_torchac_cuda
-    
+    python3 setup.py bdist_wheel --dist-dir=/workspace/LMCache/dist_lmc_kvikio
+
 WORKDIR /workspace
 
 #################### vLLM installation IMAGE ####################
 # Install torchac_cuda wheel into the vLLM image
 FROM vllm/vllm-openai:v0.6.2 AS vllm-openai
-RUN --mount=type=bind,from=build,src=/workspace/torchac_cuda/dist_torchac_cuda,target=/vllm-workspace/dist_torchac_cuda \
+RUN --mount=type=bind,from=build,src=/workspace/LMCache/dist_lmc_kvikio,target=/vllm-workspace/dist_lmc_kvikio \
 --mount=type=cache,target=/root/.cache/pip \
-pip install dist_torchac_cuda/*.whl --verbose
+pip install dist_lmc_kvikio/*.whl --verbose
 
 #################### LMCache test SERVER ####################
 # LMCache server setup using the vllm-install stage as base
 FROM vllm-openai AS vllm-lmcache
 
-ARG LMCACHE_VERSION=0.1.3
-RUN pip install lmcache lmcache_vllm
+RUN pip install lmcache_vllm
 RUN python3 -m pip install --upgrade setuptools
 
 ENTRYPOINT ["lmcache_vllm", "serve"]
