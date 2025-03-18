@@ -66,6 +66,8 @@ ENV MAX_JOBS=${max_jobs}
 ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
+RUN rm -rf /root/.cache/pip/*
+
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-build.txt
 
@@ -97,7 +99,15 @@ pip install dist_lmc_kvikio/*.whl --verbose
 # LMCache server setup using the vllm-install stage as base
 FROM vllm-openai AS vllm-lmcache
 
-RUN pip install lmcache_vllm
+WORKDIR /workspace
+RUN git clone -b v0.6.2.2 https://github.com/LMCache/lmcache-vllm.git
+WORKDIR /workspace/lmcache-vllm
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/pip \
+    python3 setup.py bdist_wheel --dist-dir=dist_lmcache_vllm
+RUN pip install dist_lmcache_vllm/*.whl --verbose
+
+RUN pip install kvikio-cu12
 RUN python3 -m pip install --upgrade setuptools
 
 ENTRYPOINT ["lmcache_vllm", "serve"]
