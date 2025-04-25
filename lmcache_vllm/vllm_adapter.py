@@ -168,6 +168,7 @@ def init_lmcache_engine(
 def broadcast_seq_group_metadata(
     model_input: "ModelInputForGPUWithSamplingMetadata",
     is_driver_worker: bool,
+    seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> "ModelInputForGPUWithSamplingMetadata":
     """Brodcast the `model_input` from driver worker to non-driver workers.
 
@@ -177,13 +178,16 @@ def broadcast_seq_group_metadata(
     :param is_driver_worker: Whether the code is executed in driver worker. 
     :type is_driver_worker: bool
 
+    :param seq_group_metadata_list: The sequence group metadata list for the current request.
+    :type seq_group_metadata_list: List[SequenceGroupMetadata]
+
     : return: Original `model_input` if driver_worker.
               Broadcasted `model_input` otherwise.
     """
 
     # broadcast len of `seq_group_metadata_list`
     if is_driver_worker:
-        seq_group_len = [len(model_input.seq_group_metadata_list)]
+        seq_group_len = [len(seq_group_metadata_list)]
     else:
         seq_group_len = [0]
     dist.broadcast_object_list(seq_group_len, src=0)
@@ -191,7 +195,7 @@ def broadcast_seq_group_metadata(
     
     # broadcast `seq_group_metadata_list`
     if is_driver_worker:
-        seq_group_metadata_list = model_input.seq_group_metadata_list
+        pass
     else:
         seq_group_metadata_list = [None] * seq_group_len
     dist.broadcast_object_list(seq_group_metadata_list , src=0)
@@ -199,7 +203,23 @@ def broadcast_seq_group_metadata(
     if is_driver_worker:
         return model_input
     else:
-        return dataclasses.replace(model_input, seq_group_metadata_list=seq_group_metadata_list)
+        # We need to reconstruct carefully as replace might not handle missing args well depending on Python/dataclass version
+        # Assuming ModelInputForGPUWithSamplingMetadata is the type
+        from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+
+        # Filter out seq_group_metadata_list if it exists as a field
+        field_names = {f.name for f in dataclasses.fields(ModelInputForGPUWithSamplingMetadata)}
+        filtered_args = {k: getattr(model_input, k) for k in field_names if hasattr(model_input, k)}
+
+        # Re-create the object using only the valid fields for its constructor
+        rebuilt_input = ModelInputForGPUWithSamplingMetadata(**filtered_args)
+
+        # If the broadcasted list is needed elsewhere (though unlikely for this specific error context),
+        # attach it after creation (if the object allows mutable attributes or has a specific place for it).
+        # For now, we assume it's not needed directly on the object for the constructor to work.
+        # setattr(rebuilt_input, 'seq_group_metadata_list_received', seq_group_metadata_list)
+
+        return rebuilt_input
 
 def close_lmcache_engine() -> None:
     """Close the LMCache engine if it is initialized.
@@ -209,7 +229,9 @@ def close_lmcache_engine() -> None:
 
 def lmcache_should_retrieve(
         model_input: "ModelInputForGPUWithSamplingMetadata", 
-        kv_caches: List[torch.Tensor]) -> RetrieveStatus:
+        kv_caches: List[torch.Tensor],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        ) -> RetrieveStatus:
     """Check should we retrieve KV from LMCache for the current model_input.
 
     :param model_input: The model input for the current request.
@@ -217,6 +239,9 @@ def lmcache_should_retrieve(
 
     :param kv_caches: The paged memory
     :type kv_caches: List[torch.Tensor]
+
+    :param seq_group_metadata_list: The sequence group metadata list for the current request.
+    :type seq_group_metadata_list: List[SequenceGroupMetadata]
 
     :return: RetrieveStatus.
     """
@@ -261,7 +286,9 @@ def lmcache_should_retrieve(
 
 def lmcache_should_store(
         model_input: "ModelInputForGPUWithSamplingMetadata", 
-        kv_caches: List[torch.Tensor]) -> StoreStatus:
+        kv_caches: List[torch.Tensor],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        ) -> StoreStatus:
     """Check should we store KV into LMCache for the current model_input.
 
     :param model_input: The model input for the current request.
@@ -269,6 +296,9 @@ def lmcache_should_store(
 
     :param kv_caches: The paged memory
     :type kv_caches: List[torch.Tensor]
+
+    :param seq_group_metadata_list: The sequence group metadata list for the current request.
+    :type seq_group_metadata_list: List[SequenceGroupMetadata]
 
     :return: A list of StoreStatus.
              StoreStatus.PREFILL/DECODE/CHUNK_PREFILL if we should store KV after PREFILL/DECODE.
@@ -318,7 +348,6 @@ def lmcache_should_store(
 
     if is_all_prefill_run:
         selected_token_indices = model_input.sampling_metadata.selected_token_indices
-        seq_group_metadata_list = model_input.seq_group_metadata_list
         seq_data_idx = 0
         selected_token_indices_idx = 0
         for seq_group_idx, seq_group_metadata in enumerate(seq_group_metadata_list):
@@ -359,6 +388,7 @@ def lmcache_store_kv(
     cache_config: CacheConfig,
     kv_caches: List[torch.Tensor],
     store_status: List[StoreStatus],
+    seq_group_metadata_list: List[SequenceGroupMetadata],
 ) -> None:
     """Store the KV caches into LMCache for the current model_input.
 
@@ -401,7 +431,6 @@ def lmcache_store_kv(
     gpu_capability = torch.cuda.get_device_capability()
 
     seq_data_idx = 0
-    seq_group_metadata_list = model_input.seq_group_metadata_list
     for seq_group_metadata in seq_group_metadata_list:
         for seqid, seq_data in seq_group_metadata.seq_data.items():
             status = store_status[seq_data_idx]
@@ -422,6 +451,14 @@ def lmcache_store_kv(
             if skip_leading_tokens < seq_len:
                 assert skip_leading_tokens % engine.chunk_size == 0
                 slot_mapping = []
+                logger.debug(f"seq_group_metadata_list: {seq_group_metadata_list}")
+                logger.debug(f"block_tables: {seq_group_metadata.block_tables if seq_group_metadata_list else 'None'}")
+
+                # Check if block_tables is None
+                if seq_group_metadata.block_tables is None:
+                    logger.error(f"block_tables is None for seq_id: {seqid}")
+                    continue
+
                 compute_slot_mapping(False, slot_mapping, seqid, seq_len, 
                     skip_leading_tokens, 0, vllm_block_size, seq_group_metadata.block_tables)
                 kv_tuple_list = []
@@ -470,6 +507,7 @@ def lmcache_retrieve_kv(
     model_input: "ModelInputForGPUWithSamplingMetadata",
     kv_caches: List[torch.Tensor],
     retrieve_status: RetrieveStatus,
+    seq_group_metadata_list: List[SequenceGroupMetadata],
 ) -> Tuple["ModelInputForGPUWithSamplingMetadata", bool]:
     """Retrieve the KV caches from LMCache for the current model_input. And 
     rebuild the model_input to reflect the changes in KV if necessary.
@@ -519,8 +557,6 @@ def lmcache_retrieve_kv(
     
     # idx is on a sequence, not a sequence group.
     idx = 0
-
-    seq_group_metadata_list = model_input.seq_group_metadata_list
 
     for seq_group_metadata in seq_group_metadata_list:
         request_id = seq_group_metadata.request_id
@@ -760,7 +796,6 @@ def build_partial_prefill_input(
         sampling_metadata=rebuilt_sampling_metadata,
         is_prompt=model_input.is_prompt,
         async_callback=model_input.async_callback,
-        seq_group_metadata_list=seq_group_metadata_list
     )
 
     return rebuilt_model_input

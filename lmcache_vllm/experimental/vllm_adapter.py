@@ -734,7 +734,6 @@ def build_partial_prefill_input(
         sampling_metadata=rebuilt_sampling_metadata,
         is_prompt=model_input.is_prompt,
         async_callback=model_input.async_callback,
-        seq_group_metadata_list=seq_group_metadata_list
     )
 
     return rebuilt_model_input

@@ -10,7 +10,7 @@ import lmcache_vllm.blend_adapter as blend_adapter
 from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
-EXPECTED_VLLM_VERSIONS = ["0.6.1.dev238+ge2c6e0a82"]
+EXPECTED_VLLM_VERSIONS = ["0.6.1.dev238+ge2c6e0a82","0.7.3+04de634a.nv25.03"]
 __version__ = "0.6.2.3"
 
 

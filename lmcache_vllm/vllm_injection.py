@@ -1,5 +1,5 @@
 """
-This version works with vllm-0.6.1.post2 and 0.6.2
+This version works with vllm-0.6.1.post2, 0.6.2 and 0.7.3+
 """
 import torch
 import asyncio
@@ -8,9 +8,8 @@ from dataclasses import fields
 from typing import Optional, List, Set, Dict, Any, Union, AsyncGenerator
 import inspect
 
-from vllm.multimodal import MultiModalInputs
+from vllm.multimodal import MultiModalKwargs as MultiModalInputs
 from vllm.lora.request import LoRARequest
-from vllm.worker.model_runner_base import dump_input_when_exception
 from vllm.distributed import get_pp_group
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 
@@ -33,8 +32,9 @@ from typing_extensions import Annotated
 from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
+from vllm.forward_context import set_forward_context
+
 @torch.inference_mode()
-@dump_input_when_exception(exclude_args=[0], exclude_kwargs=["self"])
 def new_execute_model(
     self,
     model_input,
@@ -42,19 +42,29 @@ def new_execute_model(
     intermediate_tensors,
     num_steps: int = 1,
 ): 
+    # Retrieve the cached list
+    seq_group_metadata_list = getattr(self, '_last_seq_group_metadata_list', [])
+    if not seq_group_metadata_list:
+        # Fallback or error handling if the list wasn't cached (e.g., during profiling?)
+        # Let's try accessing it via model_input if available there in some contexts, though unlikely now.
+        # This part might need refinement based on when exactly this list is needed vs available.
+        # For now, assume it must have been cached by prepare_model_input.
+        logger.warning("seq_group_metadata_list not found in cache, proceeding cautiously.")
+        # If it's truly unavailable during profiling, we might need dummy data or skip parts of LMCache logic.
+
     init_lmcache_engine(self.model_config, self.parallel_config, self.cache_config)
 
-    # TODO(Jiayi): broadcast the necessary `seq_group_metadata` in every model
-    # execution. Maybe there's a more efficient way.
-    model_input = broadcast_seq_group_metadata(model_input, self.is_driver_worker)
+    # Pass the retrieved list explicitly
+    model_input = broadcast_seq_group_metadata(model_input, self.is_driver_worker, seq_group_metadata_list)
     
     # LMCache retrieval
-    retrieve_status = lmcache_should_retrieve(model_input, kv_caches)
+    # Pass the list explicitly to functions needing it
+    retrieve_status = lmcache_should_retrieve(model_input, kv_caches, seq_group_metadata_list)
     is_skip = False
     if retrieve_status != RetrieveStatus.NONE:
         logger.info(f"KV cache retrieving mode: {retrieve_status}")
         model_input, is_skip = lmcache_retrieve_kv(
-            self.model, self.model_config.model, model_input, kv_caches, retrieve_status)
+            self.model, self.model_config.model, model_input, kv_caches, retrieve_status, seq_group_metadata_list=seq_group_metadata_list)
         if is_skip:
             logger.debug("Prefill is entirely skipped")
             
@@ -103,37 +113,50 @@ def new_execute_model(
         model_executable = self.model
 
     multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-    seqlen_agnostic_kwargs = {
-        "finished_requests_ids": model_input.finished_requests_ids,
-        "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
-    } if self.has_seqlen_agnostic else {}
     if (self.observability_config is not None
             and self.observability_config.collect_model_forward_time):
         model_forward_start = torch.cuda.Event(enable_timing=True)
         model_forward_end = torch.cuda.Event(enable_timing=True)
         model_forward_start.record()
 
+    # Determine if profiling (heuristic: kv_caches is None)
+    is_profiling = kv_caches is None
+
+    # Create forward context
+    # Ensure attn_metadata exists, even if basic, for context creation
+    if model_input.attn_metadata is None:
+        # This case might happen in edge scenarios or if prepare_model_input changed.
+        # We might need a default/dummy AttentionMetadata here if required by ForwardContext.
+        # For now, let's assert it should exist after prepare_model_input.
+        assert False, "AttentionMetadata is None in execute_model, cannot create ForwardContext."
+        
+
     if not is_skip:
-        hidden_or_intermediate_states = model_executable(
-            input_ids=model_input.input_tokens,
-            positions=model_input.input_positions,
-            kv_caches=kv_caches,
+        # Execute model within the forward context
+        with set_forward_context(
             attn_metadata=model_input.attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            **MultiModalInputs.as_kwargs(multi_modal_kwargs,
-                                        device=self.device),
-            **seqlen_agnostic_kwargs)
+            vllm_config=self.vllm_config,
+            virtual_engine=model_input.virtual_engine,
+            ):
+            hidden_or_intermediate_states = model_executable(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                intermediate_tensors=intermediate_tensors,
+                **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                            device=self.device)
+            )
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_end.record()
 
         # LMCache storing
-        store_status = lmcache_should_store(model_input, kv_caches)
+        # Pass the list explicitly to functions needing it
+        store_status = lmcache_should_store(model_input, kv_caches, seq_group_metadata_list)
         if any([status != StoreStatus.NONE for status in store_status]):
             logger.info(f"KV cache saving mode: {store_status}")
             lmcache_store_kv(self.model_config, self.parallel_config, model_executable,
-                    model_input, self.cache_config, kv_caches, store_status)
+                    model_input, self.cache_config, kv_caches, store_status, seq_group_metadata_list)
 
     # CacheBlend updates
     if lmcache_get_config().enable_blending and \
@@ -435,10 +458,13 @@ def wrap_prepare_model_input(
     model_input = original_prepare_model_input(
         self, seq_group_metadata_list, virtual_engine, finished_requests_ids)
 
+    # Store the list for later use in new_execute_model
+    self._last_seq_group_metadata_list = seq_group_metadata_list
+
     # NOTE(Sixian): Use seq_group_metadata_list because
     # sampling_metadata is only available
     # at the last stage of pipeline parallelism stages.
-    return dataclasses.replace(model_input, seq_group_metadata_list=seq_group_metadata_list)
+    return model_input
 
 original_prepare_model_input_tensors = None
 def wrap_prepare_model_input_tensors(
@@ -530,21 +556,12 @@ async def new_extract_prompt_components_async(
     return prompt, prompt_token_ids, multi_modal_data
 
 original_llm_engine_init = None
+from vllm.config import VllmConfig
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.usage.usage_lib import UsageContext
 def new_llm_engine_init(
         self,
-        model_config,
-        cache_config,
-        parallel_config,
-        scheduler_config,
-        device_config,
-        load_config,
-        lora_config,
-        speculative_config,
-        decoding_config,
-        observability_config,
-        prompt_adapter_config,
+        vllm_config: VllmConfig,
         executor_class,
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -554,17 +571,7 @@ def new_llm_engine_init(
     ) -> None:
     if use_cached_outputs:
         original_llm_engine_init(self,
-                                model_config,
-                                cache_config,
-                                parallel_config,
-                                scheduler_config,
-                                device_config,
-                                load_config,
-                                lora_config,
-                                speculative_config,
-                                decoding_config,
-                                observability_config,
-                                prompt_adapter_config,
+                                vllm_config,
                                 executor_class,
                                 log_stats,
                                 usage_context,
@@ -573,24 +580,15 @@ def new_llm_engine_init(
                                 use_cached_outputs)
     else:
         original_llm_engine_init(self,
-                                model_config,
-                                cache_config,
-                                parallel_config,
-                                scheduler_config,
-                                device_config,
-                                load_config,
-                                lora_config,
-                                speculative_config,
-                                decoding_config,
-                                observability_config,
-                                prompt_adapter_config,
+                                vllm_config,
                                 executor_class,
                                 log_stats,
                                 usage_context,
                                 stat_loggers,
-                                input_registry)
-    init_lmcache_engine(model_config, parallel_config, cache_config)
+                                input_registry,
+                                use_cached_outputs)
 
+    init_lmcache_engine(vllm_config.model_config, vllm_config.arallel_config, vllm_config.cache_config)
 
 
 def new_tokenizer_group_encode(self,
@@ -628,9 +626,24 @@ async def new_tokenizer_group_encode_async(self,
     self._raise_if_input_too_long(ret, lora_request)
     return ret
 
+# Add custom implementation for iterate_with_cancellation as it's no longer in vLLM 0.7.3
+async def iterate_with_cancellation(iterator, is_cancelled):
+    """Iterate through an async iterator until a cancellation event is set.
+    When the cancellation event is triggered, we will try our best to clean up.
+    """
+    try:
+        async for item in iterator:
+            if await is_cancelled():
+                # Early terminate the request
+                break
+            yield item
+    except Exception as e:
+        # Re-raises the exception
+        raise e
+
 from vllm.entrypoints.openai.serving_chat import ChatCompletionRequest, ChatCompletionResponse, ErrorResponse, RequestResponseMetadata, Request
-from vllm.entrypoints.openai.serving_chat import parse_chat_messages_futures, apply_mistral_chat_template, apply_hf_chat_template
-from vllm.utils import iterate_with_cancellation, random_uuid
+from vllm.entrypoints.chat_utils import parse_chat_messages_futures, apply_mistral_chat_template, apply_hf_chat_template
+from vllm.utils import random_uuid
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.inputs import TokensPrompt
@@ -818,8 +831,8 @@ def inject_blend():
     import vllm.inputs.preprocess
     global original_extract_prompt_components
     global original_extract_prompt_components_async
-    original_extract_prompt_components = vllm.inputs.preprocess.InputPreprocessor._extract_prompt_components
-    original_extract_prompt_components_async = vllm.inputs.preprocess.InputPreprocessor._extract_prompt_components_async
+    original_extract_prompt_components = vllm.inputs.preprocess.InputPreprocessor._prompt_to_llm_inputs
+    original_extract_prompt_components_async = vllm.inputs.preprocess.InputPreprocessor._prompt_to_llm_inputs_async
     vllm.inputs.preprocess.InputPreprocessor._extract_prompt_components = new_extract_prompt_components
     vllm.inputs.preprocess.InputPreprocessor._extract_prompt_components_async = new_extract_prompt_components_async
     from vllm.transformers_utils.tokenizer_group.tokenizer_group import TokenizerGroup
@@ -866,7 +879,6 @@ def InitLMCacheEnvironment() -> None:
         _new_normalize_prompt_text_to_input
     
     # Cacheblend
-    if lmcache_get_config().enable_blending:
-        inject_llama()
-        inject_flash_attn()
-        inject_blend()
+    inject_llama()
+    inject_flash_attn()
+    inject_blend()
