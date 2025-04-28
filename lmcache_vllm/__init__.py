@@ -23,6 +23,11 @@ def check_library_version(library_name, required_versions):
             if lib.__version__ in required_versions:
                 return True
             else:
+                # In case version starts with one of required versions but has extra suffix
+                for req_ver in required_versions:
+                    if lib.__version__.startswith(req_ver):
+                        logger.info(f"vLLM version {lib.__version__} matches required version {req_ver}")
+                        return True
                 logger.error(f"Version mismatch: {lib.__version__} found, {required_versions} required.")
                 return False
         else:
@@ -35,7 +40,12 @@ def check_library_version(library_name, required_versions):
 def initialize_environment():
     # Check vllm and it's version
     logger.info(f"Initializing lmcache_vllm version {__version__}, supporting vllm versions: {EXPECTED_VLLM_VERSIONS}")
-    assert check_library_version("vllm", EXPECTED_VLLM_VERSIONS), f"vllm {EXPECTED_VLLM_VERSIONS} not found"
+
+    # Check if vLLM is installed and compatible
+    vllm_check = check_library_version("vllm", EXPECTED_VLLM_VERSIONS)
+    if not vllm_check:
+        logger.warning(f"vLLM version not in {EXPECTED_VLLM_VERSIONS}. LMCache may not work correctly.")
+
     is_experimental = os.getenv("LMCACHE_USE_EXPERIMENTAL")
     if is_experimental == 'True':
         InitLMCacheExperimentalEnvironment()
