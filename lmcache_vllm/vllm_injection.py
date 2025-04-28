@@ -55,13 +55,22 @@ def new_execute_model(
 ): 
     # Retrieve the cached list
     seq_group_metadata_list = getattr(self, '_last_seq_group_metadata_list', [])
+
+    # Skip LMCache operations during profiling
+    if kv_caches is None:
+        logger.debug("Profiling run detected, skipping LMCache operations")
+        if self.lora_config:
+            self.set_active_loras(model_input.lora_requests, model_input.lora_mapping)
+        if self.prompt_adapter_config:
+            self.set_active_prompt_adapters(model_input.prompt_adapter_requests, model_input.prompt_adapter_mapping)
+        self.attn_state.begin_forward(model_input)
+        return self.model(input_ids=model_input.input_tokens, positions=model_input.input_positions,
+                         kv_caches=None, attn_metadata=model_input.attn_metadata,
+                         intermediate_tensors=intermediate_tensors,
+                         **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {}, device=self.device))
+
     if not seq_group_metadata_list:
-        # Fallback or error handling if the list wasn't cached (e.g., during profiling?)
-        # Let's try accessing it via model_input if available there in some contexts, though unlikely now.
-        # This part might need refinement based on when exactly this list is needed vs available.
-        # For now, assume it must have been cached by prepare_model_input.
         logger.warning("seq_group_metadata_list not found in cache, proceeding cautiously.")
-        # If it's truly unavailable during profiling, we might need dummy data or skip parts of LMCache logic.
 
     init_lmcache_engine(self.model_config, self.parallel_config, self.cache_config)
 

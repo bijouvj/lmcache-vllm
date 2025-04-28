@@ -424,6 +424,11 @@ def lmcache_store_kv(
     :param store_status: Indicate whether and how KV cache of each req is stored
     :type store_status: List[StoreStatus]
     """
+    # Skip during profiling
+    if kv_caches is None or (isinstance(kv_caches, list) and len(kv_caches) > 0 and kv_caches[0] is None):
+        logger.debug("Profiling run detected in store_kv, skipping")
+        return
+
     engine = LMCacheEngineBuilder.get(ENGINE_NAME)
     assert engine is not None, "LMCache engine is not initialized."
 
@@ -559,9 +564,19 @@ def lmcache_retrieve_kv(
     :return: The rebuilt model_input to reflect the changes in KV.
     :return: The boolean value to indicate whether the entire execute_model should be skipped
     """
+    # Skip during profiling
+    if kv_caches is None or (isinstance(kv_caches, list) and len(kv_caches) > 0 and kv_caches[0] is None):
+        logger.debug("Profiling run detected in retrieve_kv, skipping")
+        return model_input, False
+
     engine = LMCacheEngineBuilder.get(ENGINE_NAME)
     assert engine is not None, "LMCache engine is not initialized."
     if engine.config.enable_blending:
+        return model_input, False
+
+    # Skip if block_tables is None (happens during profiling)
+    if any(seq_group.block_tables is None for seq_group in seq_group_metadata_list):
+        logger.debug("Block tables not initialized (likely profiling), skipping")
         return model_input, False
 
     query_start_loc = model_input.attn_metadata.query_start_loc
