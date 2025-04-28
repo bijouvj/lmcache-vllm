@@ -451,8 +451,6 @@ def lmcache_store_kv(
             if skip_leading_tokens < seq_len:
                 assert skip_leading_tokens % engine.chunk_size == 0
                 slot_mapping = []
-                logger.debug(f"seq_group_metadata_list: {seq_group_metadata_list}")
-                logger.debug(f"block_tables: {seq_group_metadata.block_tables if seq_group_metadata_list else 'None'}")
 
                 # Check if block_tables is None
                 if seq_group_metadata.block_tables is None:

@@ -154,7 +154,6 @@ def new_execute_model(
         # Pass the list explicitly to functions needing it
         store_status = lmcache_should_store(model_input, kv_caches, seq_group_metadata_list)
         if any([status != StoreStatus.NONE for status in store_status]):
-            logger.info(f"KV cache saving mode: {store_status}")
             lmcache_store_kv(self.model_config, self.parallel_config, model_executable,
                     model_input, self.cache_config, kv_caches, store_status, seq_group_metadata_list)
 
@@ -588,7 +587,7 @@ def new_llm_engine_init(
                                 input_registry,
                                 use_cached_outputs)
 
-    init_lmcache_engine(vllm_config.model_config, vllm_config.arallel_config, vllm_config.cache_config)
+    init_lmcache_engine(vllm_config.model_config, vllm_config.parallel_config, vllm_config.cache_config)
 
 
 def new_tokenizer_group_encode(self,
