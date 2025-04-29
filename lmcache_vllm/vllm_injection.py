@@ -41,7 +41,7 @@ def new_execute_model(
     kv_caches,
     intermediate_tensors,
     num_steps: int = 1,
-): 
+):
     # Retrieve the cached list
     seq_group_metadata_list = getattr(self, '_last_seq_group_metadata_list', [])
     if not seq_group_metadata_list:

@@ -530,6 +530,16 @@ def lmcache_retrieve_kv(
     if engine.config.enable_blending:
         return model_input, False
 
+    # Skip if block_tables is None (happens during profiling)
+    if any(seq_group.block_tables is None for seq_group in seq_group_metadata_list):
+        logger.debug("Block tables not initialized (likely profiling), skipping lmcache_retrieve_kv")
+        return model_input, False
+
+    # Skip if any sequence group is not in a valid state for retrieval
+    if any(not hasattr(seq_group, 'is_prompt') for seq_group in seq_group_metadata_list):
+        logger.debug("Invalid sequence group state detected, skipping lmcache_retrieve_kv")
+        return model_input, False
+
     query_start_loc = model_input.attn_metadata.query_start_loc
     slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
     seq_lens = model_input.attn_metadata.seq_lens
@@ -759,6 +769,14 @@ def build_partial_prefill_input(
         rebuilt_context_lens_tensor,
         dtype=model_input.attn_metadata.context_lens_tensor.dtype,
     ).to(device)
+
+    # Also set cache_seqlens if it exists, as some backends might use this name
+    if hasattr(rebuilt_attn_metadata, 'cache_seqlens'):
+        rebuilt_attn_metadata.cache_seqlens = rebuilt_attn_metadata.context_lens_tensor
+
+    # Explicitly set seqused_k if the attribute exists, as required by some kernels with block_tables
+    if hasattr(rebuilt_attn_metadata, 'seqused_k'):
+        rebuilt_attn_metadata.seqused_k = rebuilt_attn_metadata.context_lens_tensor
 
     rebuilt_attn_metadata._cached_prefill_metadata = None
     rebuilt_sampling_metadata = None
