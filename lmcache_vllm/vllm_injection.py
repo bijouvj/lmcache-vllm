@@ -42,6 +42,31 @@ def new_execute_model(
     intermediate_tensors,
     num_steps: int = 1,
 ):
+    # Handle profiling run: kv_caches is None or a list starting with None
+    is_profiling_run = (kv_caches is None) or \
+                       (isinstance(kv_caches, list) and len(kv_caches) > 0 and kv_caches[0] is None)
+    if is_profiling_run:
+        logger.debug("Profiling run detected, skipping LMCache operations in execute_model")
+        # Execute original model logic, bypassing LMCache
+        if self.lora_config:
+             self.set_active_loras(model_input.lora_requests, model_input.lora_mapping)
+        if self.prompt_adapter_config:
+             self.set_active_prompt_adapters(model_input.prompt_adapter_requests, model_input.prompt_adapter_mapping)
+        self.attn_state.begin_forward(model_input)
+        # Call the underlying model directly
+        # Note: Ensure MultiModalInputs is imported if not already
+        hidden_states = self.model(
+             input_ids=model_input.input_tokens,
+             positions=model_input.input_positions,
+             kv_caches=None, # Pass None for profiling
+             attn_metadata=model_input.attn_metadata,
+             intermediate_tensors=intermediate_tensors,
+             **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {}, device=self.device)
+        )
+        # Profiling run usually doesn't produce SamplerOutput, return empty list
+        # as typically only the driver worker returns output, and _dummy_run handles it.
+        return []
+
     # Retrieve the cached list
     seq_group_metadata_list = getattr(self, '_last_seq_group_metadata_list', [])
     if not seq_group_metadata_list:
