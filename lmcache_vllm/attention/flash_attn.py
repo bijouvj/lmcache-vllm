@@ -116,11 +116,14 @@ def flash_attn_forward_for_cacheblend(
         else:
             # prefix-enabled attention
             assert prefill_meta.seq_lens is not None
-            # Get the context length tensor (likely name: context_lens_tensor or seqused_k)
-            context_len_tensor = getattr(prefill_meta, 'seqused_k', None) or \
-                                 getattr(prefill_meta, 'context_lens_tensor', None) or \
-                                 getattr(prefill_meta, 'cache_seqlens', None)
-            assert context_len_tensor is not None, "Could not find context length tensor (seqused_k or context_lens_tensor) in prefill_meta"
+            # Get the context length tensor explicitly checking attributes
+            context_len_tensor = getattr(prefill_meta, 'seqused_k', None)
+            if context_len_tensor is None:
+                context_len_tensor = getattr(prefill_meta, 'context_lens_tensor', None)
+            if context_len_tensor is None:
+                context_len_tensor = getattr(prefill_meta, 'cache_seqlens', None)
+
+            assert context_len_tensor is not None, "Could not find context length tensor (tried seqused_k, context_lens_tensor, cache_seqlens) in prefill_meta"
             max_seq_len = max(prefill_meta.seq_lens)
             prefill_output = flash_attn_varlen_func(  # noqa
                 q=query,
@@ -181,11 +184,14 @@ def flash_attn_forward_for_cacheblend(
         else:
             # prefix-enabled attention
             assert prefill_meta.seq_lens is not None
-            # Get the context length tensor (likely name: context_lens_tensor or seqused_k)
-            context_len_tensor = getattr(prefill_meta, 'seqused_k', None) or \
-                                 getattr(prefill_meta, 'context_lens_tensor', None) or \
-                                 getattr(prefill_meta, 'cache_seqlens', None)
-            assert context_len_tensor is not None, "Could not find context length tensor (seqused_k or context_lens_tensor) in prefill_meta"
+            # Get the context length tensor explicitly checking attributes
+            context_len_tensor = getattr(prefill_meta, 'seqused_k', None)
+            if context_len_tensor is None:
+                context_len_tensor = getattr(prefill_meta, 'context_lens_tensor', None)
+            if context_len_tensor is None:
+                context_len_tensor = getattr(prefill_meta, 'cache_seqlens', None)
+
+            assert context_len_tensor is not None, "Could not find context length tensor (tried seqused_k, context_lens_tensor, cache_seqlens) in prefill_meta"
             max_seq_len = max(prefill_meta.seq_lens)
             prefill_output = flash_attn_varlen_func(  # noqa
                 q=query,

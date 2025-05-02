@@ -705,7 +705,7 @@ async def new_create_chat_completion(
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
         conversation, mm_data_future = parse_chat_messages_futures(
-            request.messages, model_config, tokenizer)
+            request.messages, model_config, tokenizer, content_format='auto')
 
         tool_dicts = None if request.tools is None else [
             tool.model_dump() for tool in request.tools
