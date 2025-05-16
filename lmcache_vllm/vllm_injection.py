@@ -764,8 +764,12 @@ async def new_create_chat_completion(
         raw_request.state.request_metadata = request_metadata
 
     try:
-        guided_decode_logits_processor = (
-            await self._guided_decode_logits_processor(request, tokenizer))
+        if hasattr(self, "_guided_decode_logits_processor") and callable(getattr(self, "_guided_decode_logits_processor")):
+            guided_decode_logits_processor = (
+                await self._guided_decode_logits_processor(request, tokenizer))
+        else:
+            logger.warning("'_guided_decode_logits_processor' not found on OpenAIServingChat instance. Guided decoding features (e.g., JSON mode) may be unavailable. This may be due to an incompatible vLLM version.")
+            guided_decode_logits_processor = None
 
         if isinstance(prompt, str):
             prompt_inputs = self._tokenize_prompt_input(
@@ -784,11 +788,13 @@ async def new_create_chat_completion(
 
         assert prompt_inputs is not None
 
+        # Calculate default_max_tokens based on model length and prompt length
+        model_max_length = getattr(tokenizer, "model_max_length", self.max_model_len)
+        default_max_tokens = model_max_length - len(prompt_inputs["prompt_token_ids"])
+
         sampling_params = request.to_sampling_params(
-            tokenizer,
-            guided_decode_logits_processor,
-            default_max_tokens=self.max_model_len -
-            len(prompt_inputs["prompt_token_ids"]))
+            default_max_tokens=default_max_tokens,
+            logits_processor_pattern=guided_decode_logits_processor)
 
         self._log_inputs(request_id,
                         prompt_inputs,
@@ -832,12 +838,12 @@ async def new_create_chat_completion(
     # Streaming response
     if request.stream:
         return self.chat_completion_stream_generator(
-            request, result_generator, request_id, conversation, tokenizer,
+            request, result_generator, request_id, self.model_config.model, conversation, tokenizer,
             request_metadata)
 
     try:
         return await self.chat_completion_full_generator(
-            request, result_generator, request_id, conversation, tokenizer,
+            request, result_generator, request_id, self.model_config.model, conversation, tokenizer,
             request_metadata)
     except ValueError as e:
         # TODO: Use a vllm-specific Validation Error

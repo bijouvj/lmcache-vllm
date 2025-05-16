@@ -122,8 +122,10 @@ def flash_attn_forward_for_cacheblend(
                 context_len_tensor = getattr(prefill_meta, 'context_lens_tensor', None)
             if context_len_tensor is None:
                 context_len_tensor = getattr(prefill_meta, 'cache_seqlens', None)
+            if context_len_tensor is None:
+                context_len_tensor = getattr(prefill_meta, 'seq_lens_tensor', None)
 
-            assert context_len_tensor is not None, "Could not find context length tensor (tried seqused_k, context_lens_tensor, cache_seqlens) in prefill_meta"
+            assert context_len_tensor is not None, "Could not find context length tensor (tried seqused_k, context_lens_tensor, cache_seqlens, seq_lens_tensor) in prefill_meta"
             max_seq_len = max(prefill_meta.seq_lens)
             prefill_output = flash_attn_varlen_func(  # noqa
                 q=query,
@@ -190,8 +192,10 @@ def flash_attn_forward_for_cacheblend(
                 context_len_tensor = getattr(prefill_meta, 'context_lens_tensor', None)
             if context_len_tensor is None:
                 context_len_tensor = getattr(prefill_meta, 'cache_seqlens', None)
+            if context_len_tensor is None:
+                context_len_tensor = getattr(prefill_meta, 'seq_lens_tensor', None)
 
-            assert context_len_tensor is not None, "Could not find context length tensor (tried seqused_k, context_lens_tensor, cache_seqlens) in prefill_meta"
+            assert context_len_tensor is not None, "Could not find context length tensor (tried seqused_k, context_lens_tensor, cache_seqlens, seq_lens_tensor) in prefill_meta"
             max_seq_len = max(prefill_meta.seq_lens)
             prefill_output = flash_attn_varlen_func(  # noqa
                 q=query,
